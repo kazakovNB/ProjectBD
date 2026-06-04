@@ -14,6 +14,8 @@ import datetime
 import hashlib
 from functools import wraps
 import os
+import sys
+import json
 
 
 app = Flask(__name__)
@@ -176,7 +178,7 @@ def token_required(f):
             login = data['login']  # Извлекаем логин пользователя из токена
             role_id = data['role_id']  # Извлекаем роль пользователя
             life_time = data['exp']  # Извлекаем срок действия токена
-            if db.session.query(User).filter(User.login == login).first() is False:
+            if db.session.query(User).filter(User.login == login).first() is None:
                 return jsonify({'message': 'Аккаунт не активен'}), 401
         except jwt.ExpiredSignatureError:
             return jsonify({'message': 'Срок действия токена истёк'}), 401
@@ -198,7 +200,7 @@ def registering():
     if db.session.query(User).filter(User.login == data['login'].lower()).first():
         return jsonify({"message": "Пользователь с таким логином уже существует"}), 409
     new_user = User(login=data['login'].lower(), password=hashed_password, role_id=db.session.query(Role).filter(Role.role_name
-                                                                                                                 == data['role']).first().role_id,
+                                                                                                                  == data['role']).first().role_id,
                     name=data['name'].capitalize(),
                     surname=data['surname'].capitalize(), patronymic=data['patronymic'].capitalize(),
                     birthday=data['birthday'], registration=str(datetime.datetime.now()).split('.')[0], active=False,
@@ -251,9 +253,11 @@ def logining():
                 'exp': life_time
             }
             token = jwt.encode(token_info, SECRET_KEY, algorithm='HS256')
-        if isinstance(token, bytes):
-            token = token.decode('utf-8')
+            if isinstance(token, bytes):
+                token = token.decode('utf-8')
             return jsonify(access_token=token, role_id=str(user.role_id)), 200
+        else:
+            return jsonify({"message": "Неверный логин или пароль"}), 401
 
 
 # Редактирование пользователя
@@ -407,7 +411,7 @@ def get_users(login, role_id, life_time):
 
     return jsonify({
         "max_number_of_pages": f"{max_number_of_pages}",
-        "users": f"{ten_users}"
+        "users": ten_users
     })
 
 
@@ -422,14 +426,14 @@ def search_user(login, role_id, life_time):
             return get_users()
         page_number = int(data['page_number'])
         users = db.session.query(User).join(Role).filter(or_(cast(User.user_id, String).ilike(f'%{search_string}%'),
-                                                             cast(User.registration, String).ilike(f'%{search_string}%'),
-                                                             User.name.ilike(f'%{search_string}%'),
-                                                             User.surname.ilike(f'%{search_string}%'),
-                                                             User.patronymic.ilike(f'%{search_string}%'),
-                                                             User.login.ilike(f'%{search_string}%'),
-                                                             Role.role_name.ilike(f'%{search_string}%'),
-                                                             cast(User.active, String).ilike(f'%{search_string}%'))
-                                                         )
+                                                              cast(User.registration, String).ilike(f'%{search_string}%'),
+                                                              User.name.ilike(f'%{search_string}%'),
+                                                              User.surname.ilike(f'%{search_string}%'),
+                                                              User.patronymic.ilike(f'%{search_string}%'),
+                                                              User.login.ilike(f'%{search_string}%'),
+                                                              Role.role_name.ilike(f'%{search_string}%'),
+                                                              cast(User.active, String).ilike(f'%{search_string}%'))
+                                                          )
         number_of_users = users.count()
         max_number_of_pages = 1 if number_of_users <= 20 else ((number_of_users // 20) + 1)
         if page_number > max_number_of_pages:
@@ -441,7 +445,7 @@ def search_user(login, role_id, life_time):
                      for user in users]
     else:
         return jsonify({"message": "Пользователь должен иметь права администратора"}), 403
-    return jsonify({"max_number_of_pages": f"{max_number_of_pages}", "users": f"{ten_users}"})
+    return jsonify({"max_number_of_pages": f"{max_number_of_pages}", "users": ten_users})
 
 
 # Получение ролей
@@ -467,514 +471,252 @@ def create_operation(login, role_id, life_time):
         operation_date = request.form.get('operation_date')
         description = request.form.get('description')
         medical_center = request.form.get('medical_center')
-        stages = eval(request.form.get('stages'))
-        files = request.files.getlist('files')
-        files_count = 0
-        file_paths = []
-        for file in files:
-            if file:
-                files_count += 1
-                filename = f"{str(patient_id)}" + f"{str(operation_type)[0]}" \
-                           + f"{str(organ)[0]}" + f"{str(operation_date).replace(':', '')}" + f"{str(files_count)}" + ".mp4"
-                file_path = os.path.join(UPLOAD_FOLDER, filename)
-                file_paths.append(file_path)
-                file.save(file_path)
-        if files_count == 0:
-            return jsonify({"message": "Файлы не переданы"}), 400
-        if files_count == 1:
-            new_operation = Operation(user_id=user_id, operation_type=db.session.query(Type).filter(Type.type_name == operation_type).first().type_id, organ=organ,
-                                      file_video_path1=file_paths[0], file_video_path2=None,
-                                      patient_id=patient_id, operation_date=operation_date,
-                                      description=description, medical_center=medical_center)
-            db.session.add(new_operation)
-            db.session.commit()
-        if files_count == 2:
-            new_operation = Operation(user_id=user_id, operation_type=db.session.query(Type).filter(Type.type_name == operation_type).first().type_id, organ=organ,
-                                      file_video_path1=file_paths[0], file_video_path2=file_paths[1],
-                                      patient_id=patient_id, operation_date=operation_date,
-                                      description=description, medical_center=medical_center)
-            db.session.add(new_operation)
-            db.session.commit()
-        for stage in stages:
-            stage_of_new_operation = StagesOfOperation(operation_id=new_operation.operation_id,
-                                                       stage_id=db.session.query(Stage).filter(Stage.stage_name == stage['stage_name']).first().stage_id,
-                                                       timing=stage['timing'],
-                                                       bloodloss=stage['bloodloss'])
-            db.session.add(stage_of_new_operation)
-            db.session.commit()
-    else:
-        return jsonify({"message": "Пользователь должен иметь права администратора или врача"}), 403
-    return jsonify({"message": "Запись об операции успешно создана"}), 201
+-        stages = eval(request.form.get('stages'))
++        # stages previously used eval() -> switch to json.loads() for safety
++        stages_raw = request.form.get('stages')
++        try:
++            stages = json.loads(stages_raw) if stages_raw and stages_raw != 'None' else []
++        except Exception:
++            return jsonify({"message": "Некорректный формат этапов (expected JSON list)"}), 400
+         files = request.files.getlist('files')
+         files_count = 0
+         file_paths = []
+         for file in files:
+             if file:
+                 files_count += 1
+                 filename = f"{str(patient_id)}" + f"{str(operation_type)[0]}" \
+                            + f"{str(organ)[0]}" + f"{str(operation_date).replace(':', '')}" + f"{str(files_count)}" + ".mp4"
+                 file_path = os.path.join(UPLOAD_FOLDER, filename)
+                 file_paths.append(file_path)
+                 file.save(file_path)
+         if files_count == 0:
+             return jsonify({"message": "Файлы не переданы"}), 400
+         if files_count == 1:
+             new_operation = Operation(user_id=user_id, operation_type=db.session.query(Type).filter(Type.type_name == operation_type).first().type_id, organ=organ,
+                                       file_video_path1=file_paths[0], file_video_path2=None,
+                                       patient_id=patient_id, operation_date=operation_date,
+                                       description=description, medical_center=medical_center)
+             db.session.add(new_operation)
+             db.session.commit()
+         if files_count == 2:
+             new_operation = Operation(user_id=user_id, operation_type=db.session.query(Type).filter(Type.type_name == operation_type).first().type_id, organ=organ,
+                                       file_video_path1=file_paths[0], file_video_path2=file_paths[1],
+                                       patient_id=patient_id, operation_date=operation_date,
+                                       description=description, medical_center=medical_center)
+             db.session.add(new_operation)
+             db.session.commit()
+         for stage in stages:
+             stage_of_new_operation = StagesOfOperation(operation_id=new_operation.operation_id,
+                                                        stage_id=db.session.query(Stage).filter(Stage.stage_name == stage['stage_name']).first().stage_id,
+                                                        timing=stage['timing'],
+                                                        bloodloss=stage['bloodloss'])
+             db.session.add(stage_of_new_operation)
+             db.session.commit()
+     else:
+         return jsonify({"message": "Пользователь должен иметь права администратора или врача"}), 403
+     return jsonify({"message": "Запись об операции успешно создана"}), 201
 
 
 # Обновление операции
 @app.route('/update_operation', methods=['PUT'])
 @token_required
 def update_operation(login, role_id, life_time):
-    # права доступа
-    if role_id not in ('1', '2'):
-        return jsonify({"message": "Пользователь должен иметь права врача или администратора"}), 403
+@@
+     # ----- ОБНОВЛЕНИЕ ЭТАПОВ -----
+     print("update_operation(): stages from client:", new_stages_raw)
 
-    operation_id = request.form.get('operation_id')
-    old_operation = Operation.query.filter(Operation.operation_id == operation_id).first()
-    if old_operation is None:
-        return jsonify({"message": "Запись об операции не найдена"}), 404
+     # если stages не пришли или равны 'None' – просто не трогаем этапы
+     if new_stages_raw and new_stages_raw != 'None':
+-        try:
+-            stages_list = eval(new_stages_raw)  # формат как при создании операции
+-        except Exception:
+-            return jsonify({"message": "Некорректный формат этапов операции"}), 400
++        try:
++            stages_list = json.loads(new_stages_raw)
++        except Exception:
++            return jsonify({"message": "Некорректный формат этапов операции (expected JSON list)"}), 400
+@@
+         db.session.commit()
+@@
+     # ----- файлы -----
+     files = request.files.getlist('files')
+     files_count = 0
+     file_paths = []
+     for file in files:
+         if file:
+             files_count += 1
+             filename = f"{str(new_patient_id)}" + f"{str(new_operation_type)[0]}" + f"{str(new_organ)[0]}" + \
+                        f"{str(files_count)}" + ".mp4"
+             file_path = os.path.join(UPLOAD_FOLDER, filename)
+             file_paths.append(file_path)
 
-    user_id = old_operation.user_id
-    if role_id == '2' and User.query.filter(User.login == login).first().user_id != user_id:
-        return jsonify(
-            {"message": "Запись об операции может быть обновлена только её создателем или администратором"}), 403
+     if files_count > 0:
+         old_pass1 = old_operation.file_video_path1
+-        os.remove(path=old_pass1)
++        if old_pass1 and os.path.exists(old_pass1):
++            try:
++                os.remove(old_pass1)
++            except Exception:
++                pass
+         db.session.query(Operation).filter(Operation.operation_id == operation_id).update(
+             {'file_video_path1': file_paths[0]})
+         db.session.commit()
+         files[0].save(file_paths[0])
 
-    # ----- читаем новые данные -----
-    new_operation_type = request.form.get('operation_type')
-    new_patient_id = request.form.get('patient_id')
-    new_organ = request.form.get('organ')
-    new_operation_date = request.form.get('operation_date')
-    new_description = request.form.get('description')
-    new_medical_center = request.form.get('medical_center')
-    new_stages_raw = request.form.get('stages')
-
-    # приводим строки
-    if new_operation_type is not None and new_operation_type != 'None':
-        new_operation_type = new_operation_type.capitalize()
-    if new_organ is not None and new_organ != 'None':
-        new_organ = new_organ.capitalize()
-
-    # ----- обновление типа операции -----
-    if new_operation_type and new_operation_type != 'None':
-        old_type = db.session.query(Type).filter(Type.type_id == old_operation.operation_type).first()
-        old_type_name = old_type.type_name if old_type else None
-
-        if new_operation_type != old_type_name:
-            new_type = db.session.query(Type).filter(Type.type_name == new_operation_type).first()
-            if new_type is None:
-                return jsonify({"message": f"Тип операции '{new_operation_type}' не найден"}), 400
-
-            db.session.query(Operation).filter(Operation.operation_id == operation_id).update(
-                {'operation_type': new_type.type_id}
-            )
-            db.session.commit()
-
-    # ----- обновление прочих полей -----
-    if new_medical_center != old_operation.medical_center:
-        db.session.query(Operation).filter(Operation.operation_id == operation_id).update(
-            {'medical_center': new_medical_center})
-        db.session.commit()
-
-    if new_organ != old_operation.organ:
-        db.session.query(Operation).filter(Operation.operation_id == operation_id).update(
-            {'organ': new_organ})
-        db.session.commit()
-
-    if new_description != old_operation.description:
-        db.session.query(Operation).filter(Operation.operation_id == operation_id).update(
-            {'description': new_description})
-        db.session.commit()
-
-    if new_patient_id != str(old_operation.patient_id):
-        db.session.query(Operation).filter(Operation.operation_id == operation_id).update(
-            {'patient_id': new_patient_id})
-        db.session.commit()
-
-    if new_operation_date != str(old_operation.operation_date):
-        db.session.query(Operation).filter(Operation.operation_id == operation_id).update(
-            {'operation_date': new_operation_date})
-        db.session.commit()
-
-    # ----- ОБНОВЛЕНИЕ ЭТАПОВ -----
-    print("update_operation(): stages from client:", new_stages_raw)
-
-    # если stages не пришли или равны 'None' – просто не трогаем этапы
-    if new_stages_raw and new_stages_raw != 'None':
-        try:
-            stages_list = eval(new_stages_raw)  # формат как при создании операции
-        except Exception:
-            return jsonify({"message": "Некорректный формат этапов операции"}), 400
-
-        # удаляем старые этапы этой операции
-        db.session.query(StagesOfOperation).filter(
-            StagesOfOperation.operation_id == operation_id
-        ).delete()
-        db.session.commit()
-
-        # записываем новые
-        for stage in stages_list:
-            stage_name = stage.get('stage_name')
-            timing = stage.get('timing')
-            bloodloss = stage.get('bloodloss')
-
-            if not stage_name:
-                return jsonify({"message": "У одного из этапов не задано имя"}), 400
-
-            stage_row = db.session.query(Stage).filter(Stage.stage_name == stage_name).first()
-            if stage_row is None:
-                return jsonify(
-                    {"message": f"Этап '{stage_name}' не найден в таблице stages"}
-                ), 400
-
-            new_stage_of_operation = StagesOfOperation(
-                operation_id=operation_id,
-                stage_id=stage_row.stage_id,
-                timing=timing,
-                bloodloss=bloodloss
-            )
-            db.session.add(new_stage_of_operation)
-
-        db.session.commit()
-
-    # ----- файлы -----
-    files = request.files.getlist('files')
-    files_count = 0
-    file_paths = []
-    for file in files:
-        if file:
-            files_count += 1
-            filename = f"{str(new_patient_id)}" + f"{str(new_operation_type)[0]}" + f"{str(new_organ)[0]}" + \
-                       f"{str(files_count)}" + ".mp4"
-            file_path = os.path.join(UPLOAD_FOLDER, filename)
-            file_paths.append(file_path)
-
-    if files_count > 0:
-        old_pass1 = old_operation.file_video_path1
-        os.remove(path=old_pass1)
-        db.session.query(Operation).filter(Operation.operation_id == operation_id).update(
-            {'file_video_path1': file_paths[0]})
-        db.session.commit()
-        files[0].save(file_paths[0])
-
-        if old_operation.file_video_path2:
-            old_pass2 = old_operation.file_video_path2
-            os.remove(path=old_pass2)
-            db.session.query(Operation).filter(Operation.operation_id == operation_id).update(
-                {'file_video_path2': None})
-            db.session.commit()
-
-        if files_count == 2:
-            db.session.query(Operation).filter(Operation.operation_id == operation_id).update(
-                {'file_video_path2': file_paths[1]})
-            db.session.commit()
-            files[1].save(file_paths[1])
-
-    return jsonify({"message": "Запись об операции изменена"}), 201
+         if old_operation.file_video_path2:
+-            old_pass2 = old_operation.file_video_path2
+-            os.remove(path=old_pass2)
++            old_pass2 = old_operation.file_video_path2
++            if old_pass2 and os.path.exists(old_pass2):
++                try:
++                    os.remove(old_pass2)
++                except Exception:
++                    pass
+             db.session.query(Operation).filter(Operation.operation_id == operation_id).update(
+                 {'file_video_path2': None})
+             db.session.commit()
+@@
+     return jsonify({"message": "Запись об операции изменена"}), 201
 
 
 # Удаление операции
 @app.route('/delete_operation', methods=['POST'])
 @token_required
 def delete_operation(login, role_id, life_time):
-    if role_id == '2' or role_id == '1':
-        data = request.json
-        operation_id = data['operation_id']
-        operation = Operation.query.filter(Operation.operation_id == operation_id).first()
-        if operation is None:
-            return jsonify({"message": "Запись об операции не найдена"}), 404
-        user_id = operation.user_id
-        if role_id == '2' and User.query.filter(User.login == login).first().user_id != user_id:
-            return jsonify({"message": "Запись об операции может быть удалена только её создателем или администратором"}), 403
-
-        db.session.query(StagesOfOperation).filter(StagesOfOperation.operation_id == operation_id).delete()
-        db.session.commit()
-        os.remove(operation.file_video_path1)
-        if operation.file_video_path2:
-            os.remove(operation.file_video_path2)
-        db.session.query(Favourite).filter(Favourite.operation_id == operation_id).delete()
-        db.session.commit()
-        db.session.query(Operation).filter(Operation.operation_id == operation_id).delete()
-        db.session.commit()
-    else:
-        return jsonify({"message": "Пользователь должен иметь права администратора или врача"}), 403
-    return jsonify({"message": "Запись об операции успешно удалена"}), 201
-
-
-# Передача видео
-@app.route('/get_video1/<operation_id>', methods=['GET'])
-def get_video1(operation_id):
-    operation = Operation.query.filter(Operation.operation_id == operation_id).first()
-    return send_file(operation.file_video_path1, as_attachment=False, mimetype='video/mp4')
-
-
-@app.route('/get_video2/<operation_id>', methods=['GET'])
-def get_video2(operation_id):
-    operation = Operation.query.filter(Operation.operation_id == operation_id).first()
-    return send_file(operation.file_video_path2, as_attachment=False, mimetype='video/mp4')
-
-
-# Просмотр конкретной операции
-@app.route('/get_operation', methods=['GET'])
-@token_required
-def get_operation(login, role_id, life_time):
-    data = request.json
-    operation_id = data['operation_id']
-    operation = Operation.query.filter(Operation.operation_id == operation_id).first()
-    if operation is None:
-        return jsonify({"message": "Операция не найдена"}), 404
-
-    # Этапы
-    stages = db.session.query(StagesOfOperation).filter(StagesOfOperation.operation_id == operation_id).all()
-    if stages:
-        stages_of_operation = [
-            {
-                'stage_name': db.session.query(Stage).filter(Stage.stage_id == stage.stage_id).first().stage_name,
-                'timing': stage.timing.isoformat(),
-                'bloodloss': stage.bloodloss
-            }
-            for stage in stages
-        ]
-    else:
-        stages_of_operation = 'None'
-
-    # Сколько файлов
-    if operation.file_video_path2 is None:
-        files_count = 1
-    else:
-        files_count = 2
-
-    return jsonify({
-        "operation_id": f"{operation_id}",
-        "user_id": f"{operation.user_id}",
-        "patient_id": f"{operation.patient_id}",
-        "operation_type": f"{operation.type}",
-        "organ": f"{operation.organ}",
-        "operation_date": f"{(operation.operation_date.isoformat()).replace('T', ' ')}",
-        "medical_center": f"{operation.medical_center}",
-        "description": f"{operation.description}",
-        "stages": f"{stages_of_operation}",
-        "files_count": f"{files_count}",
-
-        # 🔴 НОВОЕ – пути к видеофайлам
-        "file_video_path1": operation.file_video_path1,
-        "file_video_path2": operation.file_video_path2
-    }), 200
-
-
-# Получение списка операций
-@app.route('/get_operations', methods=['GET'])
-@token_required
-def get_operations(login, role_id, life_time):
-    data = request.json
-    page_number = int(data['page_number'])
-    number_of_operations = db.session.query(Operation).count()
-    max_number_of_pages = 1 if number_of_operations <= 20 else ((number_of_operations//20)+1)
-    if page_number > max_number_of_pages:
-        return jsonify({"message": "Страница не найдена"}), 404
-    operations = db.session.query(Operation).offset((page_number - 1) * 20).limit(20).all()
-    ten_operations = [{'operation_id': operation.operation_id, 'user_id': operation.user_id,
-                       'patient_id': operation.patient_id, 'operation_type': f"{operation.type}",
-                       'organ': operation.organ,
-                       'operation_date': (operation.operation_date.isoformat()).replace("T", " "),
-                       'medical_center': operation.medical_center}
-                      for operation in operations]
-    return jsonify({"max_number_of_pages": f"{max_number_of_pages}", "operations": f"{ten_operations}"})
-
-
-# Поиск операции
-@app.route('/search_operation', methods=['GET'])
-@token_required
-def search_operation(login, role_id, life_time):
-    data = request.json
-    search_string = data['search_string']
-    if search_string == '':
-        return get_operations()
-    page_number = int(data['page_number'])
-    operations = db.session.query(Operation).join(Type).filter(or_(cast(Operation.operation_id, String).ilike(f'%{search_string}%'),
-                                                    cast(Operation.operation_date, String).ilike(f'%{search_string}%'),
-                                                    cast(Operation.user_id, String).ilike(f'%{search_string}%'),
-                                                    cast(Operation.patient_id, String).ilike(f'%{search_string}%'),
-                                                    Type.type_name.ilike(f'%{search_string}%'),
-                                                    Operation.organ.ilike(f'%{search_string}%'),
-                                                    Operation.medical_center.ilike(f'%{search_string}%'))
-                                                    )
-    number_of_operations = operations.count()
-    max_number_of_pages = 1 if number_of_operations <= 20 else ((number_of_operations//20)+1)
-    if page_number > max_number_of_pages:
-        return jsonify({"message": "Страница не найдена"}), 404
-    operations = operations.offset((page_number - 1) * 20).limit(20).all()
-    ten_operations = [{'operation_id': operation.operation_id, 'user_id': operation.user_id,
-                       'patient_id': operation.patient_id, 'operation_type': f"{operation.type}",
-                       'organ': operation.organ,
-                       'operation_date': (operation.operation_date.isoformat()).replace("T", " "),
-                       'medical_center': operation.medical_center}
-                      for operation in operations]
-    return jsonify({"max_number_of_pages": f"{max_number_of_pages}", "operations": f"{ten_operations}"})
-
-
-# Скачивание данных
-@app.route('/upload', methods=['GET'])
-@token_required
-def upload(login, role_id, life_time):
-    if role_id == '2' or role_id == '1' or role_id == '3':
-        data = request.json
-        operation_id = data['operation_id']
-        operation = Operation.query.filter(Operation.operation_id == operation_id).first()
-        if operation is None:
-            return jsonify({"message": "Запись об операции не найдена"}), 404
-        zip_filename = 'videos.zip'
-        if os.path.isfile(zip_filename):
-            os.remove(zip_filename)
-        if operation.file_video_path2:
-            file_path1 = operation.file_video_path1
-            file_name1 = file_path1.split('\\')[-1]
-            file_path2 = operation.file_video_path2
-            file_name2 = file_path2.split('\\')[-1]
-            with zipfile.ZipFile(zip_filename, 'w') as zipf:
-                zipf.write(file_path1, os.path.basename(file_name1))
-                zipf.write(file_path2, os.path.basename(file_name2))
-        else:
-            file_path1 = operation.file_video_path1
-            file_name1 = file_path1.split('\\')[-1]
-            with zipfile.ZipFile(zip_filename, 'w') as zipf:
-                zipf.write(file_path1, os.path.basename(file_name1))
-        response = send_file(zip_filename, as_attachment=True)
-        response.headers['X-Message'] = file_name1.split(".")[0][:-1].encode('utf-8').decode('latin-1')
-        return response, 200
-    else:
-        return jsonify({"message": "Пользователь должен иметь права администратора, врача или разработчика"}), 403
-
-
-# Сохранение в избранное
-@app.route('/save_to_favourites', methods=['POST'])
-@token_required
-def save_to_favourites(login, role_id, life_time):
-    data = request.json
-    operation_id = data['operation_id']
-    operation = Operation.query.filter(Operation.operation_id == operation_id).first()
-    if operation is None:
-        return jsonify({"message": "Запись об операции не найдена"}), 404
-    user_id = db.session.query(User).filter(User.login == login).first().user_id
-    if db.session.query(Favourite).filter(and_(Favourite.user_id == user_id, Favourite.operation_id == operation_id)).first():
-        return jsonify({"message": "Запись уже в избранном"}), 201
-
-    new_favourite = Favourite(user_id=user_id, operation_id=operation_id, saving_date=str(datetime.datetime.now()).split('.')[0])
-    db.session.add(new_favourite)
-    db.session.commit()
-
-    return jsonify({"message": "Запись добавлена в избранное"}), 201
-
-
-# Просмотр избранного
-@app.route('/get_favourites', methods=['GET'])
-@token_required
-def get_favourites(login, role_id, life_time):
-    data = request.json
-    user_id = db.session.query(User).filter(User.login == login).first().user_id
-    page_number = int(data['page_number'])
-    number_of_operations = db.session.query(Operation).join(Favourite).filter(Favourite.user_id == user_id).count()
-    max_number_of_pages = 1 if number_of_operations <= 20 else ((number_of_operations//20)+1)
-    if page_number > max_number_of_pages:
-        return jsonify({"message": "Страница не найдена"}), 404
-    favourite_operations = db.session.query(Operation).join(Favourite).filter(Favourite.user_id == user_id).offset((page_number - 1) * 20).limit(20).all()
-    ten_favourite_operations = [{'operation_id': favourite_operation.operation_id,
-                                 'user_id': favourite_operation.user_id,
-                                 'patient_id': favourite_operation.patient_id,
-                                 'operation_type': f"{favourite_operation.type}",
-                                 'organ': favourite_operation.organ,
-                                 'operation_date': (favourite_operation.operation_date.isoformat()).replace("T", " "),
-                                 'medical_center': favourite_operation.medical_center,
-                                 'favourite_datetime': (db.session.query(Favourite).filter(and_(Favourite.user_id ==
-                                                                                                user_id,
-                                                                                                Favourite.operation_id
-                                                                                                == favourite_operation.operation_id)).first().saving_date)}
-                                for favourite_operation in favourite_operations]
-    return jsonify({"max_number_of_pages": f"{max_number_of_pages}", "operations": f"{ten_favourite_operations}"})
-
-
-# Поиск избранного
-@app.route('/search_favourite', methods=['GET'])
-@token_required
-def search_favourite(login, role_id, life_time):
-    data = request.json
-    search_string = data['search_string']
-    if search_string == '':
-        return get_favourites()
-    page_number = int(data['page_number'])
-    user_id = db.session.query(User).filter(User.login == login).first().user_id
-    operations = db.session.query(Operation).join(Favourite).filter(Favourite.user_id == user_id).join(Type).filter(
-        or_(cast(Operation.operation_id, String).ilike(f'%{search_string}%'),
-            cast(Operation.operation_date, String).ilike(f'%{search_string}%'),
-            cast(Operation.user_id, String).ilike(f'%{search_string}%'),
-            cast(Operation.patient_id, String).ilike(f'%{search_string}%'),
-            Type.type_name.ilike(f'%{search_string}%'),
-            Operation.organ.ilike(f'%{search_string}%'),
-            Operation.medical_center.ilike(f'%{search_string}%'),
-            cast(Favourite.saving_date, String).ilike(f'%{search_string}%'))
-        )
-
-    number_of_operations = operations.count()
-    max_number_of_pages = 1 if number_of_operations <= 20 else ((number_of_operations // 20) + 1)
-    if page_number > max_number_of_pages:
-        return jsonify({"message": "Страница не найдена"}), 404
-    operations = operations.offset((page_number - 1) * 20).limit(20).all()
-    ten_operations = [{'operation_id': favourite_operation.operation_id,
-                       'user_id': favourite_operation.user_id,
-                       'patient_id': favourite_operation.patient_id,
-                       'operation_type': f"{favourite_operation.type}",
-                       'organ': favourite_operation.organ,
-                       'operation_date': (favourite_operation.operation_date.isoformat()).replace("T", " "),
-                       'medical_center': favourite_operation.medical_center,
-                       'favourite_datetime': (db.session.query(Favourite).filter(and_(Favourite.user_id ==
-                                                                                                user_id,
-                                                                                                Favourite.operation_id
-                                                                                                == favourite_operation.operation_id)).first().saving_date)}
-                      for favourite_operation in operations]
-    return jsonify({"max_number_of_pages": f"{max_number_of_pages}", "operations": f"{ten_operations}"})
-
-
-# Удаление из избранного
-@app.route('/delete_favourite', methods=['POST'])
-@token_required
-def delete_favourite(login, role_id, life_time):
-    data = request.json
-    operation_id = data['operation_id']
-    user_id = db.session.query(User).filter(User.login == login).first().user_id
-    if db.session.query(Favourite).filter(and_(Favourite.user_id == user_id, Favourite.operation_id == operation_id)).first() is None:
-        return jsonify({"message": "Запись в избранном не найдена"}), 404
-    if Operation.query.filter(Operation.operation_id == operation_id).first() is None:
-        return jsonify({"message": "Запись об операции не найдена"}), 404
-    db.session.query(Favourite).filter(and_(Favourite.user_id == user_id, Favourite.operation_id == operation_id)).delete()
-    db.session.commit()
-    return jsonify({"message": "Запись об операции успешно удалена из избранного"}), 200
-
-
-# Получение типов и этапов
-@app.route('/get_types_and_stages', methods=['GET'])
-@token_required
-def get_types_and_stages(login, role_id, life_time):
-    types_and_stages = {}
-
-    optypes = db.session.query(Type).with_entities(Type.type_name, Type.type_id).all()
-
-    for optype in optypes:
-        opstages = db.session.query(Stage).filter(Stage.type_id == optype[1]).with_entities(Stage.stage_name).all()
-        types_and_stages[optype[0]] = [opstage[0] for opstage in opstages]
-    return jsonify(types_and_stages)
-
-
-# # Создание типов и этапов
-# @app.route('/create_types_and_stages', methods=['PUT'])
-# @token_required
-# def create_types_and_stages(login, role_id, life_time):
-#     if role_id == '1':
-#         type_name = request.form.get('type_name').capitalize()
-#         stages = eval(request.form.get('type_name'))
-#         new_type = Type(type_name=type_name)
-#         db.session.add(new_type)
-#         db.session.commit()
-#         type_id = db.session.query(Type).filter(Type.type_name == type_name).first().type_id
-#         for i in range(len(stages)):
-#             new_stage = Stage(type_id=type_id, type_name=stages[i])
-#             db.session.add(new_stage)
-#             db.session.commit()
-#     else:
-#         return jsonify({"message": "Пользователь должен иметь права администратора"}), 403
-#     return jsonify({"message": "Новый тип операции создан"}), 201
-
-
-if __name__ == '__main__':
-    with app.app_context():
-        try:
-    db.create_all()
-except Exception as e:
-    print('DB connection failed. Check Postgres is running and DATABASE_URL/SQLALCHEMY_DATABASE_URI is correct.')
-    print('Error:', e)
-    raise
-    app.run(host='0.0.0.0', port=5000)
+@@
+         db.session.query(StagesOfOperation).filter(StagesOfOperation.operation_id == operation_id).delete()
+         db.session.commit()
+-        os.remove(operation.file_video_path1)
+-        if operation.file_video_path2:
+-            os.remove(operation.file_video_path2)
++        if operation.file_video_path1 and os.path.exists(operation.file_video_path1):
++            try:
++                os.remove(operation.file_video_path1)
++            except Exception:
++                pass
++        if operation.file_video_path2 and os.path.exists(operation.file_video_path2):
++            try:
++                os.remove(operation.file_video_path2)
++            except Exception:
++                pass
+         db.session.query(Favourite).filter(Favourite.operation_id == operation_id).delete()
+         db.session.commit()
+         db.session.query(Operation).filter(Operation.operation_id == operation_id).delete()
+         db.session.commit()
+@@
+ @app.route('/get_video1/<operation_id>', methods=['GET'])
+-def get_video1(operation_id):
+-    operation = Operation.query.filter(Operation.operation_id == operation_id).first()
+-    return send_file(operation.file_video_path1, as_attachment=False, mimetype='video/mp4')
++@token_required
++def get_video1(login, role_id, life_time, operation_id):
++    operation = Operation.query.filter(Operation.operation_id == operation_id).first()
++    if operation is None:
++        return jsonify({"message": "Операция не найдена"}), 404
++    path = operation.file_video_path1
++    if not path or not os.path.exists(path):
++        return jsonify({"message": "Файл видео не найден"}), 404
++    return send_file(path, as_attachment=False, mimetype='video/mp4')
+@@
+ @app.route('/get_video2/<operation_id>', methods=['GET'])
+-def get_video2(operation_id):
+-    operation = Operation.query.filter(Operation.operation_id == operation_id).first()
+-    return send_file(operation.file_video_path2, as_attachment=False, mimetype='video/mp4')
++@token_required
++def get_video2(login, role_id, life_time, operation_id):
++    operation = Operation.query.filter(Operation.operation_id == operation_id).first()
++    if operation is None:
++        return jsonify({"message": "Операция не найдена"}), 404
++    path = operation.file_video_path2
++    if not path or not os.path.exists(path):
++        return jsonify({"message": "Файл видео не найден"}), 404
++    return send_file(path, as_attachment=False, mimetype='video/mp4')
+@@
+     # Этапы
+@@
+-    if stages:
++    if stages:
+@@
+-    if operation.file_video_path2 is None:
++    if operation.file_video_path2 is None:
+         files_count = 1
+     else:
+         files_count = 2
+@@
+-    return jsonify({
++    return jsonify({
+         "operation_id": f"{operation_id}",
+         "user_id": f"{operation.user_id}",
+         "patient_id": f"{operation.patient_id}",
+         "operation_type": f"{operation.type}",
+         "organ": f"{operation.organ}",
+         "operation_date": f"{(operation.operation_date.isoformat()).replace('T', ' ')}",
+         "medical_center": f"{operation.medical_center}",
+         "description": f"{operation.description}",
+         "stages": f"{stages_of_operation}",
+-        "files_count": f"{files_count}",
+-
+-        # 🔴 НОВОЕ – пути к видеофайлам
+-        "file_video_path1": operation.file_video_path1,
+-        "file_video_path2": operation.file_video_path2
+-    }), 200
++        "files_count": f"{files_count}",
++        # 🔴 НОВОЕ – пути к видеофайлам
++        "file_video_path1": operation.file_video_path1,
++        "file_video_path2": operation.file_video_path2
++    }), 200
+@@
+     ten_operations = [{'operation_id': operation.operation_id, 'user_id': operation.user_id,
+                        'patient_id': operation.patient_id, 'operation_type': f"{operation.type}",
+                        'organ': operation.organ,
+                        'operation_date': (operation.operation_date.isoformat()).replace("T", " "),
+                        'medical_center': operation.medical_center}
+                       for operation in operations]
+-    return jsonify({"max_number_of_pages": f"{max_number_of_pages}", "operations": f"{ten_operations}"})
++    return jsonify({"max_number_of_pages": f"{max_number_of_pages}", "operations": ten_operations})
+@@
+     ten_operations = [{'operation_id': favourite_operation.operation_id,
+                        'user_id': favourite_operation.user_id,
+                        'patient_id': favourite_operation.patient_id,
+                        'operation_type': f"{favourite_operation.type}",
+                        'organ': favourite_operation.organ,
+                        'operation_date': (favourite_operation.operation_date.isoformat()).replace("T", " "),
+                        'medical_center': favourite_operation.medical_center,
+-                        'favourite_datetime': (db.session.query(Favourite).filter(and_(Favourite.user_id ==
+-                                                                                                user_id,
+-                                                                                                Favourite.operation_id
+-                                                                                                == favourite_operation.operation_id)).first().saving_date)}
+-                               for favourite_operation in favourite_operations]
+-    return jsonify({"max_number_of_pages": f"{max_number_of_pages}", "operations": f"{ten_favourite_operations}"})
++                        'favourite_datetime': (db.session.query(Favourite).filter(and_(Favourite.user_id == user_id,
++                                                                                               Favourite.operation_id == favourite_operation.operation_id)).first().saving_date)}
++                               for favourite_operation in favourite_operations]
++    return jsonify({"max_number_of_pages": f"{max_number_of_pages}", "operations": ten_favourite_operations})
+@@
+     ten_operations = [{'operation_id': favourite_operation.operation_id,
+                        'user_id': favourite_operation.user_id,
+                        'patient_id': favourite_operation.patient_id,
+                        'operation_type': f"{favourite_operation.type}",
+                        'organ': favourite_operation.organ,
+                        'operation_date': (favourite_operation.operation_date.isoformat()).replace("T", " "),
+                        'medical_center': favourite_operation.medical_center,
+-                        'favourite_datetime': (db.session.query(Favourite).filter(and_(Favourite.user_id ==
+-                                                                                                 user_id,
+-                                                                                                 Favourite.operation_id
+-                                                                                                 == favourite_operation.operation_id)).first().saving_date)}
+-                      for favourite_operation in operations]
+-    return jsonify({"max_number_of_pages": f"{max_number_of_pages}", "operations": f"{ten_operations}"})
++                        'favourite_datetime': (db.session.query(Favourite).filter(and_(Favourite.user_id == user_id,
++                                                                                               Favourite.operation_id == favourite_operation.operation_id)).first().saving_date)}
++                      for favourite_operation in operations]
++    return jsonify({"max_number_of_pages": f"{max_number_of_pages}", "operations": ten_operations})
+@@
+ if __name__ == '__main__':
+     with app.app_context():
+         try:
+             db.create_all()
+         except Exception as e:
+             print('DB connection failed. Check Postgres is running and DATABASE_URL/SQLALCHEMY_DATABASE_URI is correct.')
+             print('Error:', e)
+             raise
+         app.run(host='0.0.0.0', port=5000)
